@@ -14,16 +14,27 @@ from that demo's tuned values.
 
 - `star-gaze.frag` — the GLSL scene (GStreamer `glshader` host)
 - `star-gaze.py` — runner: fullscreen per monitor, cursor hide/restore,
-  appsrc time-code feed, mouse steering, keypress helper, lock watch
-- `star-gaze-keys.sh` — hidden 1px input helper (any-key dismiss)
+  appsrc time-code feed, mouse steering, workspace/lock/signal dismiss
+- `star-gaze-idle.py` — idle supervisor: polls `omarchy-shell idle status`
+  (same timing source as stock), launches the runner at the idle threshold,
+  kills it on non-mouse activity or lock. No timeout, like stock.
 - `preview.sh` — manual preview: `preview.sh [seconds]` (default 20)
+
+## Dismiss matrix (stock parity, except the mouse)
+
+| Input | Stock | star-gaze |
+|---|---|---|
+| Keypress | exits | exits (supervisor sees shell go active, mouse still) |
+| Workspace/focus change | exits | exits |
+| Mouse move | ignored | steers the camera |
+| Lock at 300s | takes over | takes over (Quickshell untouched) |
+| Timeout | none | none |
 
 ## Idle wiring (Omarchy)
 
-- `hypridle` launches the runner after 150s idle (launch-only listener;
-  Quickshell keeps owning screen lock at 300s)
+- supervisor autostarted from `~/.config/hypr/autostart.lua`
 - stock saver disabled via `omarchy toggle screensaver` to avoid double launch
-- `hypridle` autostarted from `~/.config/hypr/autostart.lua`
+- no new packages, no sudo, nothing outside `~/.config`
 
 ## Push to GitHub
 

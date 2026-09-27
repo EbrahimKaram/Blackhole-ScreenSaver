@@ -141,6 +141,21 @@ def build_pipeline(monitor, frag_src, fps_report):
     return pipe
 
 
+def lock_watcher():
+    """Exit once the system lock screen engages (it layers above us)."""
+    while not stop.is_set():
+        time.sleep(2.0)
+        try:
+            out = subprocess.check_output(
+                ["omarchy-shell", "lock", "isLocked"], timeout=5)
+            if out.decode().strip() == "true":
+                log("lock screen engaged — exiting")
+                stop.set()
+                return
+        except Exception:
+            pass
+
+
 def stdin_watcher():
     if not sys.stdin.isatty():
         return
@@ -272,6 +287,7 @@ def main():
 
     threading.Thread(target=stdin_watcher, daemon=True).start()
     threading.Thread(target=focus_watcher, daemon=True).start()
+    threading.Thread(target=lock_watcher, daemon=True).start()
     threading.Thread(target=mouse_thread, args=(monitors,), daemon=True).start()
 
     deadline = time.monotonic() + args.seconds if args.seconds > 0 else None
