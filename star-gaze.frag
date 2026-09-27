@@ -7,6 +7,9 @@ precision highp float;
 // (threejsroadmap.com, Dan Greenheck): geodesic raymarch + analytic thin-disk
 // hits + blackbody disk + D^3 doppler beaming + keplerian turbulence,
 // with the bent ray sampling a procedural starfield (lensing comes free).
+// From Luminet 1979 (A&A 75, 228 — the first simulated BH photograph):
+// gravitational-redshift dimming of the inner disk (the dark gap + crescent)
+// and an explicit photon-ring term from closest ray approach.
 //
 // NOTE: animation time is decoded from the input frame (appsrc time-code,
 // written by star-gaze.py), NOT from the glshader `time` uniform, which is
@@ -124,8 +127,10 @@ vec4 diskColor(float hr, vec3 hit, vec3 rayDir, float t) {
   float normR = clamp((hr - DIN) / (DOUT - DIN), 0.0, 1.0);
   // demo edge softness: 0.18 inner / 0.5 outer
   float edge = smoothstep(0.0, 0.18, normR) * smoothstep(1.0, 0.5, normR);
-  // demo temperature: steep falloff to a 1500K rim, ~45kK peak
-  float tempK = mix(1500.0, 45000.0, pow(DIN / hr, 5.0));
+  // temperature: hot rim fading to a 1500K edge. Kept moderate (not the
+  // demo's very steep ramp) so the gradient renders continuous rather
+  // than as distinct concentric bands.
+  float tempK = mix(1500.0, 45000.0, pow(DIN / hr, 2.8));
   vec3 col = blackbody(tempK);
   // keplerian rotation with cyclic crossfade (no infinite wind-up)
   float ang = atan(hit.z, hit.x);
@@ -145,7 +150,12 @@ vec4 diskColor(float hr, vec3 hit, vec3 rayDir, float t) {
   float D = 1.0 / max(1.0 - beta * dot(vel, rayDir), 1e-3);
   float boost = clamp(pow(D, 3.0), 0.1, 5.0);
   col *= boost * (0.32 + 0.68 * rings);
-  col *= 3.5; // demo diskBrightness (tempered for our filmic path)
+  // Luminet 1979: light climbing out of the well is gravitationally
+  // redshifted (bolometric ~g^3-4). Darkens the innermost rim into the
+  // shadow gap and pushes peak emission outward into the crescent.
+  float grav = sqrt(clamp(1.0 - RS / hr, 0.0, 1.0));
+  col *= grav * grav * grav;
+  col *= 4.5; // demo diskBrightness, raised to compensate redshift losses
   return vec4(col, alpha);
 }
 
@@ -174,10 +184,12 @@ void main() {
   vec3 prev = camPos;
   vec3 col = vec3(0.0);
   float alpha = 0.0;
+  float rmin = 1e9;
   bool captured = false;
   bool escaped = false;
   for (int i = 0; i < STEPS; i++) {
     float r = length(pos);
+    rmin = min(rmin, r);
     if (r < RS * 1.01) { captured = true; break; }
     if (r > 50.0) { escaped = true; break; }
     float stepLen = 0.12 + r * 0.09;
@@ -204,6 +216,11 @@ void main() {
     bg += starLayer(rd);
     bg += nebula(rd);
     col = col + bg * (1.0 - alpha);
+    // Luminet 1979: higher-order images pile into a thin photon ring at the
+    // shadow's edge. Our coarse march can't resolve it — paint it from each
+    // escaping ray's closest approach to the photon sphere (1.5*RS).
+    float pring = exp(-max(rmin - 1.5 * RS, 0.0) * 6.0);
+    col += vec3(0.75, 0.85, 1.0) * pring * 0.6 * (1.0 - alpha);
   }
 
   col = vec3(1.0) - exp(-col * 1.7);
