@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""star-gaze idle supervisor — launches the saver on shell idle, kills on activity.
+"""star-gaze idle supervisor — launches the saver on shell idle, keeps it up.
 
 Uses the Omarchy shell's own idle state (`omarchy-shell idle status`), so the
 launch moment always matches the stock screensaver timing (it follows
 ~/.config/omarchy/shell.json automatically) with zero new dependencies.
 
-Dismiss policy (parity with stock, except the mouse):
-  - keypresses / any non-mouse activity -> kill (shell reports active AND the
-    mouse hasn't moved recently)
-  - mouse movement alone -> saver keeps running (hover steering)
-  - workspace/focus change, lock screen, signals -> kill
-  - no saver timeout (like stock); the 300s Quickshell lock takes over
+Keep-alive policy (parity with stock's "cycle remains armed"):
+  - the shell `idle` flag is consulted ONLY to launch. Once the saver is up,
+    post-launch idle-flips are ignored entirely: starting a fullscreen saver
+    makes the compositor report spurious activity, and that flip latches the
+    flag, so it can never be used for dismissal.
+  - keypress dismissal is handled by Hyprland itself: while the saver runs we
+    sit in the `star-gaze` submap (~/.config/hypr/bindings.lua), whose
+    catchall runs dismiss.sh (pkill the runner + leave the submap).
+  - mouse movement alone never dismisses (hover steering in the saver).
+  - workspace/focus change exits the runner via its focus watcher, lock
+    screen exits it via its lock watcher, signals terminate it.
+  - own lock timer: the stock shell cancels its lock when its (disabled)
+    saver never appears, so we drive `omarchy system lock` ourselves from
+    its lockDelay.
 """
 import json
 import subprocess
@@ -21,7 +29,6 @@ HERE = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
 RUNNER = __import__("os").path.join(HERE, "star-gaze.py")
 LOG_PATH = "/tmp/star-gaze-idle.log"
 POLL = 1.0
-MOUSE_STILL_SECS = 3.0
 
 
 def log(msg):
@@ -48,19 +55,29 @@ def shell_is_locked():
         return False
 
 
-def cursor_pos():
-    try:
-        out = subprocess.check_output(["hyprctl", "cursorpos", "-j"], timeout=2)
-        pos = json.loads(out.decode())
-        return (pos["x"], pos["y"])
-    except Exception:
-        return None
+def submap_enter():
+    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.submap("star-gaze")'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def submap_reset():
+    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.submap("reset")'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def clear_strays():
     # "[s]" bracket trick: never matches our own pkill command line.
     subprocess.run(["pkill", "-f", "[s]tar-gaze[.]py"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def stop_proc(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    submap_reset()
 
 
 PIDFILE = "/tmp/star-gaze-idle.pid"
@@ -84,28 +101,20 @@ def main():
 
     test_launch = "--test-launch" in sys.argv
     clear_strays()
+    submap_reset()  # recover from a previous crash while saver was up
     proc = None
+    launch_time = time.monotonic()
+    lock_fired = False
     if test_launch:
         log("test-launch: starting runner immediately (supervision stays on)")
         proc = subprocess.Popen([sys.executable, RUNNER])
+        launch_time = time.monotonic()
+        submap_enter()
 
-    last_mouse = cursor_pos()
-    last_mouse_move = 0.0  # unknown at start -> treat as still (safe: allows launch)
-    mouse_known_still = True
     log("supervisor started")
     while True:
         time.sleep(POLL)
         now = time.monotonic()
-
-        cur = cursor_pos()
-        if cur is not None and last_mouse is not None and cur != last_mouse:
-            last_mouse_move = now
-            mouse_known_still = False
-        elif cur is not None and last_mouse is None:
-            last_mouse_move = now
-            mouse_known_still = False
-        last_mouse = cur
-        mouse_still = (now - last_mouse_move) > MOUSE_STILL_SECS
 
         st = shell_idle_status()
         if st is None:
@@ -114,24 +123,46 @@ def main():
         want = bool(st.get("enabled")) and not bool(st.get("stayAwake"))
         idle = bool(st.get("idle"))
         running = proc is not None and proc.poll() is None
-        if running and proc.poll() is not None:
-            log(f"runner exited on its own (rc={proc.returncode})")
+        if proc is not None and proc.poll() is not None:
+            # Dismissed: keypress (submap catchall), workspace switch
+            # (focus watcher), lock (lock watcher), or a crash.
+            log(f"saver exited (rc={proc.returncode})")
             proc = None
             running = False
+            submap_reset()
 
         if not running and want and idle and not locked:
             log("idle threshold reached -> launching saver")
             proc = subprocess.Popen([sys.executable, RUNNER])
-        elif running and (not want or locked or (not idle and mouse_still)):
-            reason = ("supervision off" if not want else
-                      "locked" if locked else "activity (mouse still)")
-            log(f"killing saver: {reason}")
-            proc.terminate()
+            launch_time = now
+            lock_fired = False
+            submap_enter()
+        elif running:
+            if not want or locked:
+                reason = ("supervision off" if not want else "locked")
+                log(f"killing saver: {reason}")
+                stop_proc(proc)
+                proc = None
+                continue
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            proc = None
+                lock_delay = float(st.get("lockDelay", 150) or 150)
+            except (TypeError, ValueError):
+                lock_delay = 150.0
+            age = now - launch_time
+            if (not lock_fired and lock_delay > 0 and age >= lock_delay
+                    and want and not locked):
+                log(f"lock deadline reached ({age:.0f}s >= {lock_delay:.0f}s) "
+                    f"-> stopping saver, locking system")
+                lock_fired = True
+                stop_proc(proc)
+                proc = None
+                subprocess.run(["omarchy", "system", "lock"],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+                continue
+            # Otherwise: keep running. The shell idle flag is NOT consulted
+            # while up (launch-time flip latches it); dismissal arrives as
+            # runner exit via catchall key / workspace / lock watchers.
 
 
 if __name__ == "__main__":

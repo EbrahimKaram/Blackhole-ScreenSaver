@@ -310,6 +310,8 @@ def main():
     for pipe in pipes:
         pipe.set_state(Gst.State.NULL)
     set_cursor(False)
+    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.submap("reset")'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log("stopped, cursor restored")
     return 0
 
