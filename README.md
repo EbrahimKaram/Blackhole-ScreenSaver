@@ -36,12 +36,18 @@ from that demo's tuned values.
 | Mouse move | ignored | steers the camera |
 | Lock at 300s | takes over | takes over (supervisor runs `omarchy system lock`) |
 | Timeout | none | none (lock deadline above) |
-- `preview.sh` — manual preview: `preview.sh [seconds]` (default 20)
+- `preview.sh` — manual preview: `preview.sh [seconds]` (default: run until
+  dismissed). Enters the `star-gaze` submap so any keypress dismisses, and
+  writes `/tmp/star-gaze-preview.pid` so the idle supervisor neither launches
+  a second instance nor resets the submap while the preview is up.
 
 ## Idle wiring (Omarchy)
 
 - supervisor autostarted from `~/.config/hypr/autostart.lua`
 - stock saver disabled via `omarchy toggle screensaver` to avoid double launch
+- System → Screensaver in the Omarchy menu is overridden in
+  `~/.config/omarchy/extensions/omarchy-menu.jsonc` to run `preview.sh`
+  instead of `omarchy-launch-screensaver`
 - no new packages, no sudo, nothing outside `~/.config`
 
 ## Push to GitHub

@@ -21,6 +21,7 @@ Keep-alive policy (parity with stock's "cycle remains armed"):
     its lockDelay.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -38,12 +39,26 @@ def log(msg):
         f.write(line + "\n")
 
 
+idle_query_ok = True
+
+
 def shell_idle_status():
+    """Shell idle state, or None while the shell is still starting up."""
+    global idle_query_ok
     try:
         out = subprocess.check_output(["omarchy-shell", "idle", "status"], timeout=5)
+    except Exception as e:
+        if idle_query_ok:
+            log(f"idle status query failed (shell not ready yet?): {e}")
+            idle_query_ok = False
+        return None
+    if not idle_query_ok:
+        log("idle status query recovered")
+        idle_query_ok = True
+    try:
         return json.loads(out.decode())
     except Exception as e:
-        log(f"idle status query failed: {e}")
+        log(f"idle status decode failed: {e}")
         return None
 
 
@@ -65,6 +80,14 @@ def submap_reset():
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def restore_cursor():
+    """Safety net: unhide the pointer if a saver died without restoring it."""
+    subprocess.run(
+        ["hyprctl", "eval", "hl.config({cursor = {invisible = false}})"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 def clear_strays():
     # "[s]" bracket trick: never matches our own pkill command line.
     subprocess.run(["pkill", "-f", "[s]tar-gaze[.]py"],
@@ -77,16 +100,29 @@ def stop_proc(proc):
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+        proc.wait(timeout=5)
+    restore_cursor()
     submap_reset()
 
 
 PIDFILE = "/tmp/star-gaze-idle.pid"
+PREVIEWFILE = "/tmp/star-gaze-preview.pid"
+
+
+def manual_preview_active():
+    """True while preview.sh owns a saver (menu-launched, no idle cycle)."""
+    try:
+        with open(PREVIEWFILE) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def main():
     # Single instance via pidfile (cmdline text matching can't tell our
     # launcher wrappers apart from a real supervisor).
-    import os
     try:
         with open(PIDFILE) as f:
             other = int(f.read().strip())
@@ -122,6 +158,7 @@ def main():
         locked = shell_is_locked()
         want = bool(st.get("enabled")) and not bool(st.get("stayAwake"))
         idle = bool(st.get("idle"))
+        manual = manual_preview_active()
         running = proc is not None and proc.poll() is None
         if proc is not None and proc.poll() is not None:
             # Dismissed: keypress (submap catchall), workspace switch
@@ -129,9 +166,11 @@ def main():
             log(f"saver exited (rc={proc.returncode})")
             proc = None
             running = False
-            submap_reset()
+            restore_cursor()
+            if not manual:
+                submap_reset()
 
-        if not running and want and idle and not locked:
+        if not running and want and idle and not locked and not manual:
             log("idle threshold reached -> launching saver")
             proc = subprocess.Popen([sys.executable, RUNNER])
             launch_time = now

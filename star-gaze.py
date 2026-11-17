@@ -61,9 +61,15 @@ def hypr(*args):
 
 
 def set_cursor(invisible):
+    """Hide/show the pointer.
+
+    Hyprland 0.56's Lua config parser rejects `hyprctl keyword`, so the
+    setting goes through `hyprctl eval` instead.
+    """
     val = "true" if invisible else "false"
     subprocess.run(
-        ["hyprctl", "keyword", "cursor:invisible", val],
+        ["hyprctl", "eval",
+         f"hl.config({{cursor = {{invisible = {val}}}}})"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
@@ -291,28 +297,29 @@ def main():
     threading.Thread(target=mouse_thread, args=(monitors,), daemon=True).start()
 
     deadline = time.monotonic() + args.seconds if args.seconds > 0 else None
-    while not stop.is_set():
-        if deadline and time.monotonic() >= deadline:
-            log("timeout reached — exiting")
-            break
+    try:
+        while not stop.is_set():
+            if deadline and time.monotonic() >= deadline:
+                log("timeout reached — exiting")
+                break
+            for pipe in pipes:
+                bus = pipe.get_bus()
+                while True:
+                    msg = bus.pop()
+                    if msg is None:
+                        break
+                    if msg.type == Gst.MessageType.ERROR:
+                        err, dbg = msg.parse_error()
+                        log(f"GStreamer ERROR: {err} ({dbg})")
+                        stop.set()
+            time.sleep(0.2)
+    finally:
         for pipe in pipes:
-            bus = pipe.get_bus()
-            while True:
-                msg = bus.pop()
-                if msg is None:
-                    break
-                if msg.type == Gst.MessageType.ERROR:
-                    err, dbg = msg.parse_error()
-                    log(f"GStreamer ERROR: {err} ({dbg})")
-                    stop.set()
-        time.sleep(0.2)
-
-    for pipe in pipes:
-        pipe.set_state(Gst.State.NULL)
-    set_cursor(False)
-    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.submap("reset")'],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log("stopped, cursor restored")
+            pipe.set_state(Gst.State.NULL)
+        set_cursor(False)
+        subprocess.run(["hyprctl", "dispatch", 'hl.dsp.submap("reset")'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("stopped, cursor restored")
     return 0
 
 
